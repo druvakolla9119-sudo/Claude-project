@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Smart Sensor Dashboard</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 0; padding: 24px; background: #f3f5f8; color: #1f2933; }
+    main { max-width: 900px; margin: 0 auto; }
+    textarea { width: 100%; height: 180px; font-family: monospace; font-size: 13px; box-sizing: border-box; padding: 8px; }
+    button { padding: 10px 18px; font-size: 15px; cursor: pointer; margin: 8px 8px 0 0; border: 0; border-radius: 6px; background: #2563eb; color: #fff; }
+    button.secondary { background: #e4e7eb; color: #1f2933; }
+    #status { margin-top: 14px; font-weight: 600; }
+    .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-top: 16px; }
+    .tile { background: #fff; border-radius: 8px; padding: 12px; }
+    .tile small { color: #616e7c; text-transform: uppercase; font-size: 11px; }
+    .tile b { display: block; font-size: 22px; margin-top: 4px; }
+    ul { background: #fff; border-radius: 8px; padding: 12px 12px 12px 30px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Smart Sensor Dashboard</h1>
+  <p>Paste raw telemetry as JSON or CSV (header row required), or load the sample.</p>
+
+  <textarea id="input"></textarea>
+  <div>
+    <button class="secondary" id="sampleBtn">Load sample data</button>
+    <button id="previewBtn">Analyse</button>
+    <button id="generateBtn">Download PDF report</button>
+  </div>
+  <div id="status"></div>
+  <div id="results"></div>
+
+  <script>
+    // Sample: a temperature sensor with a spike, a power meter in watts, and one bad row
+    function sampleData() {
+      const rows = [];
+      const start = Date.parse('2026-09-28T00:00:00Z');
+      for (let i = 0; i < 96; i++) {
+        const ts = new Date(start + i * 15 * 60000).toISOString();
+        if (i >= 40 && i < 46) continue; // simulated outage (gap)
+        rows.push({ timestamp: ts, sensorId: 'temp-01', unit: 'C', value: +(22 + Math.sin(i / 10) * 1.5).toFixed(2) });
+        rows.push({ timestamp: ts, sensorId: 'meter-01', unit: 'W', value: Math.round(1200 + 800 * Math.sin(i / 15) + (i === 70 ? 4000 : 0)) });
+      }
+      rows[20].value = 85.6;                         // anomaly
+      rows.push({ timestamp: rows[5].timestamp, sensorId: 'temp-01', unit: 'C', value: -999 }); // error code
+      return rows;
+    }
+
+    const input = document.getElementById('input');
+    const statusDiv = document.getElementById('status');
+
+    function payload() {
+      const text = input.value.trim();
+      if (!text) throw new Error('Please paste data or load the sample first.');
+      let sensorData;
+      try { sensorData = JSON.parse(text); } catch { sensorData = text; } // not JSON -> treat as CSV
+      return JSON.stringify({ sensorData });
+    }
+
+    async function post(url) {
+      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload() });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error || 'Request failed');
+      }
+      return response;
+    }
+
+    function render(result) {
+      const s = result.summary;
+      const tiles = [
+        ['Sensors', s.sensorCount], ['Valid readings', s.validReadings], ['Rejected', s.rejectedReadings],
+        ['Anomalies', s.anomalyCount], ['Data gaps', s.gapCount]
+      ];
+      if (s.totalEnergyKwh !== null) tiles.push(['Total energy', s.totalEnergyKwh + ' kWh']);
+      const results = document.getElementById('results');
+      results.innerHTML = '<div class="tiles"></div><h3>Key findings</h3><ul></ul>';
+      tiles.forEach(([label, value]) => {
+        const div = document.createElement('div');
+        div.className = 'tile';
+        div.innerHTML = '<small></small><b></b>';
+        div.querySelector('small').textContent = label;
+        div.querySelector('b').textContent = value;
+        results.querySelector('.tiles').appendChild(div);
+      });
+      result.insights.forEach(line => {
+        const li = document.createElement('li');
+        li.textContent = line;
+        results.querySelector('ul').appendChild(li);
+      });
+    }
+
+    document.getElementById('sampleBtn').onclick = () => { input.value = JSON.stringify(sampleData(), null, 1); };
+
+    document.getElementById('previewBtn').onclick = async () => {
+      statusDiv.textContent = 'Analysing...';
+      try {
+        render(await (await post('/api/reports/process')).json());
+        statusDiv.textContent = '';
+      } catch (err) { statusDiv.textContent = `Error: ${err.message}`; }
+    };
+
+    document.getElementById('generateBtn').onclick = async () => {
+      statusDiv.textContent = 'Generating report...';
+      try {
+        const blob = await (await post('/api/reports/generate')).blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `sensor_report_${Date.now()}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        statusDiv.textContent = 'Report downloaded.';
+      } catch (err) { statusDiv.textContent = `Error: ${err.message}`; }
+    };
+  </script>
+</main>
+</body>
+</html>
